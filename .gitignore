@@ -1,0 +1,9 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+plot/*
+produced_data/*
+raw_data/*
+reports/*
+README.html
