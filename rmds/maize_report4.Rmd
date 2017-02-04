@@ -1,0 +1,117 @@
+---
+title: "maize - TM"
+author: "Piotr Gawroński"
+date: "3 lutego 2017"
+output: html_document
+---
+
+Averaging of ribosome footprint coverage without assigning positions to 5'/3'-end of the reads. Examples of the rps8 and rbcL genes are presented below. Black lines represent averaged value.
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(fig.width=5, fig.height=4, fig.path='figs/',
+                      echo=FALSE, warning=FALSE, message=FALSE,
+                      dev = c("png"))
+source("../bin/functions24.R")
+
+# data manipulation
+library(plyr); library(dplyr)
+
+# bioinformatic packages
+library(Biostrings); library(GenomicAlignments)
+
+# graphics
+library(ggplot2); library(artyfarty); library(gridExtra); library(grid); library(RColorBrewer)
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+my_theme <- theme(axis.line = element_line(lineend = "square"),
+        axis.ticks = element_line(colour = "black"),
+        axis.text = element_text(colour = "black"))
+```
+
+```{r averaging_coverage, cache = T}
+# I am reading names of the experiments from file
+my_files <- read.table("../raw_data/reads", header = T)
+my_files <- my_files[c(1,3),]
+
+# creating empty list() to store reads
+mylist.names <- my_files$name
+mylist <- vector("list", length(mylist.names))
+names(mylist) <- mylist.names
+
+# reading sequences (used for mapping of reads) and substracting transcript sequences
+sequences <- readDNAStringSet("../raw_data/pt_maize_transcripts_flanks50.fa")
+transcripts <- DNAStringSet(sequences, start = 51, end = width(sequences) - 50)
+ 
+
+for(i in 1:length(my_files$name)){
+  reads <- readGAlignments(file = paste("../raw_data/maize_mapped_reads/", my_files$name[i],
+                                        "_transcriptome_Aligned.out.bam", sep = ""))
+  reads <- reads[strand(reads) == "+",]
+  my_genes <- coverage(reads)
+  my_genes_list <- lapply(my_genes, function(x) {
+    my_coverage <- as.numeric(x)[51:(length(as.numeric(x))-50)]
+    # normalising coverage by mean coverage
+    my_norm_coverage <- my_coverage / mean(my_coverage)
+    my_norm_coverage
+  })
+  
+  # sorting list by gene names
+  my_genes_list <- my_genes_list[sort(names(my_genes_list))]
+  
+  # checking length of genes, all should be TRUE
+  # print(lapply(my_genes_list, length) == width(transcripts[sort(names(transcripts))]))
+  mylist[[i]] <- my_genes_list
+}
+rm(my_genes, reads, my_genes_list,i)
+
+
+## Averaging between replicates
+
+reads_averaged <- vector("list", length(mylist[[1]]))
+names(reads_averaged)  <- names(mylist[[1]])
+
+for(i in 1:length(mylist[[1]])){
+  my_matrix <- matrix(ncol = length(mylist), nrow = length(mylist[[1]][[i]]))
+  for(j in 1:length(mylist)){
+    my_matrix[,j] <- mylist[[j]][[i]]
+  }
+  reads_averaged[[i]] <- rowMeans(my_matrix)
+}
+
+# checking an averaging of the last element in the list
+plot(reads_averaged[[i]], type = "l", xlab = "Position (bp)", ylab = "Ribosome occupancy (a.u.)")
+lines(mylist[[1]][[i]], type = "l", col = "red")
+lines(mylist[[2]][[i]], type = "l", col = "green")
+title(main = names(reads_averaged)[i])
+rm(my_matrix, i, j)
+
+# checking the length of each vector in the list
+# lapply(reads_averaged, length) == width(transcripts[sort(names(transcripts))])
+
+reads_averaged_codons <- lapply(reads_averaged, function(x){
+  my_df <- data_frame(cov = x, codon_no = rep(1:(length(x)/3), each = 3))
+  my_df <- my_df %>% group_by(codon_no) %>% summarise(cov = mean(cov))
+  my_df
+})
+
+plot(reads_averaged_codons[["rbcL"]]$cov, type = "l", xlab = "Position (codon)", 
+     ylab = "Ribosome occupancy (a.u.)")
+title(main = "rbcL")
+rm(W0_reads_averaged, W0_reads)
+
+```
+
+```{r cleaning_env_01}
+rm(my_matrix, i, j, mylist, mylist.names, my_files)
+```
+
+```{r}
+#write.table(tibble(gene = names(reads_averaged)), file = "../raw_data/maize_uniprot.txt", quote = F,sep = "\t", row.names = F)
+```
+
+
+
+
+
+
+
+

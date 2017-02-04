@@ -1,0 +1,1258 @@
+---
+title: "Analysis of Chotewutmontri & Barkan data - pausing"
+author: "PG"
+date: "January 3, 2017"
+output:
+  html_document:
+    theme: united
+---
+
+# mRNA features
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(fig.width=5, fig.height=4, fig.path='figs/',
+                      echo=FALSE, warning=FALSE, message=FALSE,
+                      dev = c("png"))
+source("bin/functions24.R")
+
+# data manipulation
+library(plyr); library(dplyr)
+
+# bioinformatic packages
+library(Biostrings); library(GenomicAlignments)
+
+# graphics
+library(ggplot2); library(artyfarty); library(gridExtra); library(grid); library(RColorBrewer)
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+my_theme <- theme(axis.line = element_line(lineend = "square"),
+        axis.ticks = element_line(colour = "black"),
+        axis.text = element_text(colour = "black"))
+```
+
+I will analyse data from segment 9 (probably the most similar to the Arabidopsis young leaves) reps 2 and 3. Rep 1 is outlier as it was shown in "report2".
+
+```{r read_length, cache = T, include = F}
+
+# I am reading names of the experiments from file
+my_files <- read.table("raw_data/reads", header = T)
+my_files <- my_files[c(1,3),]
+
+# creating empty list() to store reads
+mylist.names <- my_files$name
+mylist <- vector("list", length(mylist.names))
+names(mylist) <- mylist.names
+
+# reading sequences (used for mapping of reads) and substracting transcript sequences
+sequences <- readDNAStringSet("raw_data/pt_maize_transcripts_flanks50.fa")
+transcripts <- DNAStringSet(sequences, start = 51, end = width(sequences) - 50)
+ 
+# reading results of mapping and calculating p_scores
+for(i in my_files$name){
+  print(paste("raw_data/maize_mapped_reads/", i, "_transcriptome_Aligned.out.bam", sep = ""))
+  reads <- readGAlignments(file = paste("raw_data/maize_mapped_reads/", i, "_transcriptome_Aligned.out.bam", sep = ""))
+  mylist[[i]] <- codon.cov(transcripts, reads,ribo_shift = -7)
+}
+rm(i, mylist.names, reads)
+
+names(mylist) <- paste(my_files$seqment, my_files$replicate, sep = "_")
+
+```
+
+```{r p_score_averaging_calc, cache = T, include = F}
+nuc_coverage <- mylist[[1]]
+
+p_scores <- vector("list", length(nuc_coverage))
+names(p_scores) <- names(nuc_coverage)
+
+for(i in 1:length(sequences)){
+  my_example <- data_frame()
+  for(x in 1:length(mylist)){
+    temp <- mylist[[x]][[i]]
+    temp$sample <- names(mylist)[x]
+    my_example <- rbind(my_example, temp)
+  }
+  my_example_mean <- my_example %>% group_by(start) %>% summarise(occ = mean(occ),
+                                                                  p_score = mean(p_score),
+                                                                  mean_reads = mean(mean_reads))
+  my_example_mean$seqnames <- my_example$seqnames[1:(nrow(my_example)/length(mylist))]
+  my_example_mean$codon <- my_example$codon[1:(nrow(my_example)/length(mylist))]
+  my_example_mean$sample <- "averaged"
+  my_example <- rbind(my_example, my_example_mean)
+  my_example <- my_example %>% filter(sample == "averaged") %>% select(-sample)
+  p_scores[[i]] <- my_example
+  rm(my_example, my_example_mean, temp)
+}
+
+#sum(sapply(p_scores, nrow) == sapply(nuc_coverage, nrow))
+rm(i, my_example, my_example_mean, x, temp, reads, nuc_coverage)
+
+p_scores <- p_scores[sort(names(p_scores))]
+
+all_p_scores <- bind_rows(p_scores)
+#all_p_scores %>% filter(p_score > 20 & mean_reads > 3) %>% arrange(desc(p_score))
+
+```
+
+```{r rbcL_plot, fig.height=3}
+ggplot(p_scores[["rbcL"]], aes(start, p_score)) + 
+  geom_line() + theme_classic() + labs(x = "Position (bp)", y = "Pause score", title = "rbcL")
+
+# a <- p_scores[["rbcL"]]
+# a %>% filter(p_score > 20) # 1149
+# b <- a %>% filter(start > 1180, start < 1200)
+# 
+# ggplot(b, aes(start, p_score)) + 
+#   geom_line() + theme_classic() + labs(x = "Position (bp)", y = "Pause score", title = "rbcL")
+# b
+
+```
+
+## mRNA secondary structure
+I have analysed ribosome pause sites with p-score > 10. There are 315 such sites in maize transcriptome.
+
+```{r mfe_loading, cache = T, include = F}
+load("produced_data/maize_mfe.RData")  
+seq_mfe <- seq_mfe[sort(names(seq_mfe))]
+#identical(lapply(seq_mfe, nrow), lapply(p_scores, nrow))
+```
+
+```{r mfe_calc_W0, cache = T, fig.width=3, fig.height=3}
+seq_mfe_pscore <- lapply(seq_along(p_scores), function(x) {
+                    my_df <- p_scores[[x]]
+                    my_df$mfe <- seq_mfe[[x]]$mfe
+                    my_df <- my_df[c(1,2,4,5,7)]
+                  })
+names(seq_mfe_pscore) <- names(seq_mfe)
+
+ccf_mfe <- lapply(seq_mfe_pscore, function(x) mfe.ccf(x, cutoff = 10, window = 50))
+ccf_mfe <- do.call(rbind.data.frame, ccf_mfe)
+#ccf_mfe$case <- rep(paste("pause_", 1:80, sep = ""), each = 101)
+#nrow(ccf_mfe)/101
+
+ccf_mfe_summ <- ccf_mfe %>% group_by(pos) %>% 
+  summarise(ccf_mean = mean(ccf), ccf_se = se(ccf),
+            mfe_mean = mean(mfe), mfe_se = se(mfe),
+            n = length(ccf))
+ 
+p1 <- ggplot(ccf_mfe_summ, aes(pos, mfe_mean)) + 
+  geom_ribbon(aes(ymin = mfe_mean - mfe_se, ymax = mfe_mean + mfe_se), alpha = 0.2) +
+  geom_line() +
+  theme_classic() + ylim(c(-8.1,-6)) +
+  annotate("rect", xmin = -22.5, xmax = 7.5, ymin = -Inf, ymax = -8, alpha = 0.2, fill = "red") +
+  annotate("rect", xmin = -.5, xmax = .5, ymin = -Inf, ymax = -8, alpha = 0.4, fill = "red") +
+  labs(x = "Distance to pause site (bp)", y = "Secondary Structure (kcal/mol)") 
+
+p1
+```
+
+```{r mfe_calc_bkg, cache = T, fig.width=3, fig.height=3}
+seq_mfe_pscore <- lapply(seq_along(p_scores), function(x) {
+                    my_df <- p_scores[[x]]
+                    my_df$mfe <- seq_mfe[[x]]$mfe
+                    my_df <- my_df[c(1,2,4,5,7)]
+                  }) 
+names(seq_mfe_pscore) <- names(seq_mfe)
+
+ccf_mfe <- lapply(seq_mfe_pscore, function(x) mfe.ccf(x, cutoff = 10, window = 50, bkg = T))
+ccf_mfe <- do.call(rbind.data.frame, ccf_mfe)
+
+ccf_mfe_summ <- ccf_mfe %>% group_by(pos) %>% 
+  summarise(ccf_mean = mean(ccf), ccf_se = se(ccf),
+            mfe_mean = mean(mfe), mfe_se = se(mfe),
+            n = length(ccf))
+
+p2 <- ggplot(ccf_mfe_summ, aes(pos, mfe_mean)) + 
+  geom_ribbon(aes(ymin = mfe_mean - mfe_se, ymax = mfe_mean + mfe_se), alpha = 0.2) +
+  geom_line() +
+  theme_classic() + ylim(c(-8.1,-6)) +
+  annotate("rect", xmin = -22.5, xmax = 7.5, ymin = -Inf, ymax = -8, alpha = 0.2, fill = "red") +
+  annotate("rect", xmin = -.5, xmax = .5, ymin = -Inf, ymax = -8, alpha = 0.4, fill = "red") +
+  labs(x = "Distance to pause site (bp)", y = "Secondary Structure (kcal/mol)", title = "Random sequences") 
+p2
+```
+
+
+```{r mfe_plot2, echo = F, fig.width=3, fig.height=3, fig.cap="Distribution of minimal folding energy values in all chloroplast mRNAs. Vertical line represent tenth percentile (mfe = -11.6 kcal/mol)."}
+seq_mfe_pscore_df <- do.call(rbind.data.frame, seq_mfe_pscore)
+
+ggplot(seq_mfe_pscore_df, aes(x = mfe)) + geom_histogram(binwidth = 0.5) +
+  theme_classic() + geom_vline(xintercept = quantile(seq_mfe_pscore_df$mfe, .1)) +
+  annotate("text", x = -13, y = 4500, label = paste(quantile(seq_mfe_pscore_df$mfe, .1), "\n 10%"), size = 3) +
+  labs(x = "minimal folding energy (kcal/mol)") +
+  scale_y_continuous(labels=function(x) format(x, big.mark = ",", scientific = FALSE))
+
+
+```
+
+```{r fig.width=3.5, fig.height=2.5}
+pos <- 1149
+my_mfe <- seq_mfe_pscore[["rbcL"]] %>% filter(start > pos -20 & start < pos + 50)
+ggplot(my_mfe, aes(start - pos, p_score)) + geom_line() + theme_classic()
+ggplot(my_mfe, aes(start - pos, mfe)) + geom_line() + theme_classic()
+
+```
+
+
+### another confirmation
+Here I will try to check if the possibility of the ribosome pausing is higher in front of mRNA secondary structure. Therefore I am looking for sites with high secondary structure (mfe < -11.6) and check for ribosome pausing arround these sites (centered to position 0). 
+
+```{r mfe2p_score_calc, include = T, cache = T, fig.width=8, fig.height=4}
+seq_mfe_pscore <- lapply(seq_along(p_scores), function(x) {
+                    my_df <- p_scores[[x]]
+                    my_df$mfe <- seq_mfe[[x]]$mfe
+                    my_df <- my_df[c(1:5,7)]
+                  })
+names(seq_mfe_pscore) <- names(seq_mfe)
+
+
+my_df <- data_frame()
+
+for(i in 1:length(sequences)){
+  min_length <- 51*2 + 51 + 50
+  mfe_cutoff <- quantile(seq_mfe_pscore_df$mfe, .1)
+  x <- seq_mfe_pscore[[i]]
+  if(nrow(x) >= min_length){
+    my_structures <- which(x$mfe < mfe_cutoff)
+    my_structures <- my_structures[my_structures %in% (51+41):(nrow(x)-51-41)]
+    for(n in my_structures){
+      my_x <- x[(n-50):(n+40),]
+      if(sum(my_x$mfe[1:50] < mfe_cutoff) < 2){
+        mean_occ <- mean(my_x$occ)
+        if(mean_occ >= 3){
+          my_df_temp <- data_frame(mfe = my_x$mfe,
+                                   pos = -50:40,
+                                   occ = my_x$occ / mean_occ,
+                                   occ2 = log2(occ + 1),
+                                   gene = paste(my_x$seqnames[1], my_x$start[51], sep = "_"))
+          my_df <- rbind(my_df, my_df_temp)
+        }
+      }
+    }
+  }
+}
+rm(x,i, min_length, mfe_cutoff, my_structures, n, my_x, mean_occ, my_df_temp)
+
+#print(paste("No of sites analysed: ", nrow(my_df) / 91))
+
+my_df2 <- my_df %>% group_by(pos) %>% summarise(occ_mean = mean(occ), occ_se = se(occ),
+                                                occ2_mean = mean(occ2), occ2_se = se(occ2),
+                                                mfe_mean = mean(mfe), mfe_se = se(mfe))
+
+p1 <- ggplot(my_df2, aes(pos, mfe_mean)) + geom_line() + 
+  geom_ribbon(aes(ymin = mfe_mean - mfe_se, ymax = mfe_mean + mfe_se), alpha = .3) +
+  ylim(-13, -5) +
+  theme_classic() +
+  labs(x = "Position [bp]", y = "Secondary Structure [kcal/mol]") +
+  annotate("text", x = -40, y = -5.2, label = paste("n =", nrow(my_df)/91), size = 3)
+p2 <- ggplot(my_df2, aes(pos, occ_mean)) + geom_line() +
+  geom_ribbon(aes(ymin = occ_mean - occ_se, ymax = occ_mean + occ_se), alpha = .3) +
+  ylim(0.6,1.6) +
+  labs(x = "Position [bp]", y = "Average pause score [a.u.]") +
+  theme_classic()
+```
+
+```{r mfe2p_score_random_calc, include = F, cache = T}
+my_list <- vector("list", nrow(do.call(rbind.data.frame, p_scores)))
+
+for(i in 1:length(sequences)){
+  z <- 1
+  print(i)
+  min_length <- 51*2 + 51 + 50
+  mfe_cutoff <- quantile(seq_mfe_pscore_df$mfe, .1)
+  x <- seq_mfe_pscore[[i]]
+  if(nrow(x) >= min_length){
+    my_structures <- which(x$mfe < mfe_cutoff)
+    my_structures <- my_structures[my_structures %in% (51+41):(nrow(x)-51-41)]
+    set.seed(234)
+    my_structures <- sample((51+41):(nrow(x)-51-41), size = length(my_structures)*5, replace = T)
+    
+    for(n in my_structures){
+      my_x <- x[(n-50):(n+40),]
+      #if(sum(my_x$mfe[1:40] < mfe_cutoff) < 4){
+        mean_occ <- mean(my_x$occ)
+        if(mean_occ >= 3){
+          my_df_temp <- data_frame(mfe = my_x$mfe,
+                                   pos = -50:40,
+                                   occ = my_x$occ / mean_occ,
+                                   occ2 = log2(occ + 1),
+                                   gene = paste(my_x$seqnames[1], my_x$start[41], sep = "_"))
+          my_list[[z]] <- my_df_temp
+          z <- z + 1
+        }
+      #}
+    }
+  }
+}
+rm(x,i, min_length, mfe_cutoff, my_structures, n, my_x, mean_occ, my_df_temp)
+
+my_df <- do.call(rbind.data.frame, my_list)
+
+my_df2 <- my_df %>% group_by(pos) %>% summarise(occ_mean = mean(occ), occ_se = se(occ),
+                                                occ2_mean = mean(occ2), occ2_se = se(occ2),
+                                                mfe_mean = mean(mfe), mfe_se = se(mfe))
+
+
+p3 <- ggplot(my_df2, aes(pos, mfe_mean)) + geom_line() + 
+  geom_ribbon(aes(ymin = mfe_mean - mfe_se, ymax = mfe_mean + mfe_se), alpha = .3) +
+  ylim(-13, -5) +
+  theme_classic() +
+  labs(x = "Position [bp]", y = "Secondary Structure [kcal/mol]", title = "Random sequences") +
+  annotate("text", x = -40, y = -5.2, label = paste("n =", nrow(my_df)/91), size = 3)
+p4 <- ggplot(my_df2, aes(pos, occ_mean)) + geom_line() +
+  geom_ribbon(aes(ymin = occ_mean - occ_se, ymax = occ_mean + occ_se), alpha = .3) +
+  ylim(0.6,1.6) +
+  labs(x = "Position [bp]", y = "Average pause score [a.u.]") +
+  theme_classic()
+```
+
+```{r mfe2p_score_plot2, fig.width=6, fig.height=6}
+multiplot(p1,p2,p3,p4, cols = 2)
+
+```
+
+```{r cleaning_env_03, include = F}
+rm(z, ccf_mfe, ccf_mfe_summ, my_df, my_df2, my_df_sel, my_list, p1,p2,p3,p4, seq_mfe_pscore_df)
+```
+
+
+## cross-correlation with SD
+
+```{r, sd_loading, include = F, cache = T}
+load("produced_data/maize_sd.RData")
+seq_sd <- seq_sd[sort(names(seq_sd))] 
+#identical(lapply(seq_sd, nrow), lapply(p_scores, nrow))
+```
+
+```{r _sd_calc, cache = T, include = F}
+seq_f2b_pscore <- lapply(seq_along(p_scores), function(x){
+                    my_df <- p_scores[[x]]
+                    my_df$deltaG <- seq_sd[[x]]$deltaG
+                    my_df <- my_df[c(1,2,4,5,7)]
+                    as_data_frame(my_df)})
+names(seq_f2b_pscore) <- names(seq_sd)
+
+ccf_f2b <- lapply(seq_f2b_pscore, function(x) f2b.ccf(x, cutoff = 10, window = 40))
+ccf_f2b <- do.call(rbind.data.frame, ccf_f2b)
+ccf_f2b$type <- "real"
+
+ccf_f2b_summ <- ccf_f2b %>% group_by(pos, type) %>% 
+  summarise(ccf_mean = mean(ccf, na.rm = T), ccf_se = se(ccf),
+            deltaG_mean = mean(deltaG), deltaG_se = se(deltaG),
+            n = length(ccf))
+ccf_f2b_summ <- filter(ccf_f2b_summ, pos %in% -24:9)
+
+p1 <- ggplot(ccf_f2b_summ, aes(pos, deltaG_mean)) + 
+  geom_ribbon(aes(ymin = deltaG_mean - deltaG_se, ymax = deltaG_mean + deltaG_se), alpha = 0.2) +
+  geom_line() +
+  ylim(c(0,2)) + 
+  theme_classic() +
+  labs(x = "Position (bp)", y = "delta-G (a.u.)") +
+  annotate("text", x = -20, y = 2, label = paste("n =", ccf_f2b_summ$n[1]), size = 3)
+```
+
+```{r sd_random, cache = T, include = F}
+seq_f2b_pscore <- lapply(seq_along(p_scores), function(x){
+                    my_df <- p_scores[[x]]
+                    my_df$deltaG <- seq_sd[[x]]$deltaG
+                    my_df <- my_df[c(1,2,4,5,7)]
+                    as_data_frame(my_df)})
+names(seq_f2b_pscore) <- names(seq_sd)
+
+ccf_f2b <- lapply(seq_f2b_pscore, function(x) f2b.ccf(x, cutoff = 10, window = 40,bkg = T))
+ccf_f2b <- do.call(rbind.data.frame, ccf_f2b)
+ccf_f2b$type <- "real"
+
+ccf_f2b_summ <- ccf_f2b %>% group_by(pos, type) %>% 
+  summarise(ccf_mean = mean(ccf, na.rm = T), ccf_se = se(ccf),
+            deltaG_mean = mean(deltaG), deltaG_se = se(deltaG),
+            n = length(ccf))
+ccf_f2b_summ <- filter(ccf_f2b_summ, pos %in% -24:9)
+
+p2 <- ggplot(ccf_f2b_summ, aes(pos, deltaG_mean)) + 
+  geom_ribbon(aes(ymin = deltaG_mean - deltaG_se, ymax = deltaG_mean + deltaG_se), alpha = 0.2) +
+  geom_line() +
+  ylim(c(0,2)) + 
+  theme_classic() +
+  labs(x = "Position (bp)", y = "delta-G (a.u.)", title = "Random sequences") +
+  annotate("text", x = -20, y = 2, label = paste("n =", ccf_f2b_summ$n[1]), size = 3)
+```
+
+```{r sd_plot, fig.width=6, fig.height=3}
+multiplot(p1,p2, cols = 2)
+```
+
+
+```{r fig.width=3.5, fig.height=2.5}
+pos <- 1149
+my_sd <- seq_f2b_pscore[["rbcL"]] %>% filter(start > pos -30 & start < pos + 10)
+ggplot(my_sd, aes(start - pos, p_score)) + geom_line() + theme_classic()
+ggplot(my_sd, aes(start - pos, deltaG)) + geom_line() + theme_classic()
+
+```
+
+
+### Calculate delta-G around pause sites with different p_core cutoffs
+
+```{r sd_p_score_function, fig.width=4, fig.height=3, cache = T}
+
+p_score_values <- seq(10, 50, by = 10)
+my_list <- vector("list", length = length(p_score_values))
+
+
+for(i in 1:length(p_score_values)){
+  ccf_f2b <- lapply(seq_f2b_pscore, function(x) f2b.ccf(x, cutoff = p_score_values[i], window = 40))
+  ccf_f2b <- do.call(rbind.data.frame, ccf_f2b)
+  ccf_f2b$type <- "real"
+  
+  ccf_f2b_summ <- ccf_f2b %>% group_by(pos, type) %>% 
+    summarise(ccf_mean = mean(ccf, na.rm = T), ccf_se = se(ccf),
+              deltaG_mean = mean(deltaG), deltaG_se = se(deltaG),
+              n = length(ccf))
+  ccf_f2b_summ$p_score <- p_score_values[i]
+  ccf_f2b_summ <- filter(ccf_f2b_summ, pos %in% -24:9)
+  my_list[[i]] <- ccf_f2b_summ
+}
+f2b_df <- bind_rows(my_list)
+f2b_df$p_score <- factor(f2b_df$p_score, levels = seq(10, 50, by = 10))
+
+ggplot(f2b_df, aes(pos, deltaG_mean, colour = p_score)) + 
+  #geom_ribbon(aes(ymin = deltaG_mean - deltaG_se, ymax = deltaG_mean + deltaG_se), alpha = 0.2) +
+  geom_line(aes(group = p_score), size = 1) +
+  #ylim(c(0,2)) + 
+  theme_classic() + my_theme +
+  labs(x = "Position (bp)", y = "delta-G (a.u.)", title = "all reads") +
+  scale_colour_manual(values=cbPalette)
+```
+
+### I will also check if subseting reads by length may influence observed distribution
+
+```{r sd_short_long, cache = T, include = F}
+### ---- long reads
+
+# I am reading names of the experiments from file
+my_files <- read.table("raw_data/reads", header = T)
+my_files <- my_files[c(1,3),]
+
+# creating empty list() to store reads
+mylist.names <- my_files$name
+mylist <- vector("list", length(mylist.names))
+names(mylist) <- mylist.names
+
+# reading results of mapping and calculating p_scores_long
+for(i in my_files$name){
+  print(paste("raw_data/maize_mapped_reads/", i, "_transcriptome_Aligned.out.bam", sep = ""))
+  reads <- readGAlignments(file = paste("raw_data/maize_mapped_reads/", i, "_transcriptome_Aligned.out.bam", sep = ""))
+  mylist[[i]] <- codon.cov(transcripts, reads,ribo_shift = -7, length = 30:42)
+}
+rm(i, mylist.names, reads)
+names(mylist) <- paste(my_files$seqment, my_files$replicate, sep = "_")
+
+nuc_coverage <- mylist[[1]]
+
+p_scores_long <- vector("list", length(nuc_coverage))
+names(p_scores_long) <- names(nuc_coverage)
+
+for(i in 1:length(sequences)){
+  my_example <- data_frame()
+  for(x in 1:length(mylist)){
+    temp <- mylist[[x]][[i]]
+    temp$sample <- names(mylist)[x]
+    my_example <- rbind(my_example, temp)
+  }
+  my_example_mean <- my_example %>% group_by(start) %>% summarise(occ = mean(occ),
+                                                                  p_score = mean(p_score),
+                                                                  mean_reads = mean(mean_reads))
+  my_example_mean$seqnames <- my_example$seqnames[1:(nrow(my_example)/length(mylist))]
+  my_example_mean$codon <- my_example$codon[1:(nrow(my_example)/length(mylist))]
+  my_example_mean$sample <- "averaged"
+  my_example <- rbind(my_example, my_example_mean)
+  my_example <- my_example %>% filter(sample == "averaged") %>% select(-sample)
+  p_scores_long[[i]] <- my_example
+  rm(my_example, my_example_mean, temp)
+}
+
+#sum(sapply(p_scores_long, nrow) == sapply(nuc_coverage, nrow))
+rm(i, my_example, my_example_mean, x, temp, reads, nuc_coverage)
+p_scores_long <- p_scores_long[sort(names(p_scores_long))]
+
+
+### ---- short reads
+# I am reading names of the experiments from file
+my_files <- read.table("raw_data/reads", header = T)
+my_files <- my_files[c(1,3),]
+
+# creating empty list() to store reads
+mylist.names <- my_files$name
+mylist <- vector("list", length(mylist.names))
+names(mylist) <- mylist.names
+
+# reading results of mapping and calculating p_scores_short
+for(i in my_files$name){
+  print(paste("raw_data/maize_mapped_reads/", i, "_transcriptome_Aligned.out.bam", sep = ""))
+  reads <- readGAlignments(file = paste("raw_data/maize_mapped_reads/", i, "_transcriptome_Aligned.out.bam", sep = ""))
+  mylist[[i]] <- codon.cov(transcripts, reads,ribo_shift = -7, length = 20:29)
+}
+rm(i, mylist.names, reads)
+names(mylist) <- paste(my_files$seqment, my_files$replicate, sep = "_")
+
+nuc_coverage <- mylist[[1]]
+
+p_scores_short <- vector("list", length(nuc_coverage))
+names(p_scores_short) <- names(nuc_coverage)
+
+for(i in 1:length(sequences)){
+  my_example <- data_frame()
+  for(x in 1:length(mylist)){
+    temp <- mylist[[x]][[i]]
+    temp$sample <- names(mylist)[x]
+    my_example <- rbind(my_example, temp)
+  }
+  my_example_mean <- my_example %>% group_by(start) %>% summarise(occ = mean(occ),
+                                                                  p_score = mean(p_score),
+                                                                  mean_reads = mean(mean_reads))
+  my_example_mean$seqnames <- my_example$seqnames[1:(nrow(my_example)/length(mylist))]
+  my_example_mean$codon <- my_example$codon[1:(nrow(my_example)/length(mylist))]
+  my_example_mean$sample <- "averaged"
+  my_example <- rbind(my_example, my_example_mean)
+  my_example <- my_example %>% filter(sample == "averaged") %>% select(-sample)
+  p_scores_short[[i]] <- my_example
+  rm(my_example, my_example_mean, temp)
+}
+
+#sum(sapply(p_scores_short, nrow) == sapply(nuc_coverage, nrow))
+rm(i, my_example, my_example_mean, x, temp, reads, nuc_coverage)
+
+p_scores_short <- p_scores_short[sort(names(p_scores_short))]
+
+
+
+
+
+```
+
+```{r sd_p_score_function_short, fig.width=4, fig.height=3, cache = T}
+seq_f2b_pscore_short <- lapply(seq_along(p_scores_short), function(x){
+                    my_df <- p_scores_short[[x]]
+                    my_df$deltaG <- seq_sd[[x]]$deltaG
+                    my_df <- my_df[c(1,2,4,5,7)]
+                    as_data_frame(my_df)})
+names(seq_f2b_pscore_short) <- names(seq_sd)
+
+
+
+p_score_values <- seq(10, 50, by = 10)
+my_list <- vector("list", length = length(p_score_values))
+
+
+for(i in 1:length(p_score_values)){
+  ccf_f2b <- lapply(seq_f2b_pscore_short, function(x) f2b.ccf(x, cutoff = p_score_values[i], window = 40))
+  ccf_f2b <- do.call(rbind.data.frame, ccf_f2b)
+  ccf_f2b$type <- "real"
+  
+  ccf_f2b_summ <- ccf_f2b %>% group_by(pos, type) %>% 
+    summarise(ccf_mean = mean(ccf, na.rm = T), ccf_se = se(ccf),
+              deltaG_mean = mean(deltaG), deltaG_se = se(deltaG),
+              n = length(ccf))
+  ccf_f2b_summ$p_score <- p_score_values[i]
+  ccf_f2b_summ <- filter(ccf_f2b_summ, pos %in% -24:9)
+  my_list[[i]] <- ccf_f2b_summ
+}
+f2b_df <- bind_rows(my_list)
+f2b_df$p_score <- factor(f2b_df$p_score, levels = seq(10, 50, by = 10))
+
+ggplot(f2b_df, aes(pos, deltaG_mean, colour = p_score)) + 
+  #geom_ribbon(aes(ymin = deltaG_mean - deltaG_se, ymax = deltaG_mean + deltaG_se), alpha = 0.2) +
+  geom_line(aes(group = p_score), size = 1) +
+  #ylim(c(0,2)) + 
+  theme_classic() + my_theme +
+  labs(x = "Position (bp)", y = "delta-G (a.u.)", title = "short reads (20-29bp)") +
+  scale_colour_manual(values=cbPalette)
+```
+
+```{r sd_p_score_function_long, fig.width=4, fig.height=3, cache = T}
+seq_f2b_pscore_long <- lapply(seq_along(p_scores_long), function(x){
+                    my_df <- p_scores_long[[x]]
+                    my_df$deltaG <- seq_sd[[x]]$deltaG
+                    my_df <- my_df[c(1,2,4,5,7)]
+                    as_data_frame(my_df)})
+names(seq_f2b_pscore_long) <- names(seq_sd)
+
+
+
+p_score_values <- seq(10, 50, by = 10)
+my_list <- vector("list", length = length(p_score_values))
+
+
+for(i in 1:length(p_score_values)){
+  ccf_f2b <- lapply(seq_f2b_pscore_long, function(x) f2b.ccf(x, cutoff = p_score_values[i], window = 40))
+  ccf_f2b <- do.call(rbind.data.frame, ccf_f2b)
+  ccf_f2b$type <- "real"
+  
+  ccf_f2b_summ <- ccf_f2b %>% group_by(pos, type) %>% 
+    summarise(ccf_mean = mean(ccf, na.rm = T), ccf_se = se(ccf),
+              deltaG_mean = mean(deltaG), deltaG_se = se(deltaG),
+              n = length(ccf))
+  ccf_f2b_summ$p_score <- p_score_values[i]
+  ccf_f2b_summ <- filter(ccf_f2b_summ, pos %in% -24:9)
+  my_list[[i]] <- ccf_f2b_summ
+}
+f2b_df <- bind_rows(my_list)
+f2b_df$p_score <- factor(f2b_df$p_score, levels = seq(10, 50, by = 10))
+
+ggplot(f2b_df, aes(pos, deltaG_mean, colour = p_score)) + 
+  #geom_ribbon(aes(ymin = deltaG_mean - deltaG_se, ymax = deltaG_mean + deltaG_se), alpha = 0.2) +
+  geom_line(aes(group = p_score), size = 1) +
+  #ylim(c(0,2)) + 
+  theme_classic() + my_theme +
+  labs(x = "Position (bp)", y = "delta-G (a.u.)", title = "long reads (30-42bp)") +
+  scale_colour_manual(values=cbPalette)
+```
+
+```{r cleaning_env_02, include = F}
+rm(f2b_df, seq_f2b_pscore_long, seq_f2b_pscore_short)
+```
+
+
+```{r sd_plot2, echo = F, fig.width=3, fig.height=3,  fig.cap="Distribution of affinities for aSD in all chloroplast mRNAs. Vertical line represent tenth percentile (mfe = -2.73 kcal/mol)."}
+require(scales)
+seq_f2b_pscore_df <- do.call(rbind.data.frame, seq_f2b_pscore)
+
+ggplot(seq_f2b_pscore_df, aes(x = deltaG)) + geom_histogram(binwidth = .5) +
+  theme_classic() + 
+  geom_vline(xintercept = quantile(seq_f2b_pscore_df$deltaG, 0.1)) +
+  annotate("text", x = -4, y = 14000, 
+           label = paste(round(quantile(seq_f2b_pscore_df$deltaG, 0.1),3), "\n 10%"), size = 3) +
+  labs(x = expression(paste(Delta, "G for binding to aSD")), sep = "") +
+  scale_y_continuous(labels=function(x) format(x, big.mark = ",", scientific = FALSE))
+
+
+#nrow(seq_f2b_pscore_df %>% filter(deltaG < -1)) / nrow(seq_f2b_pscore_df)
+
+```
+
+20.9% sequences have deltaG lower than -1.
+
+### another confirmation
+Here I will try if ribosome pousing is higher just after SD sequences. 
+
+```{r sd2p_score_calc1, include = F, cache = T}
+seq_f2b_pscore <- lapply(seq_along(p_scores), function(x){
+                    my_df <- p_scores[[x]]
+                    my_df$deltaG <- seq_sd[[x]]$deltaG
+                    my_df <- my_df[c(1:5,7)]
+                    as_data_frame(my_df)})
+names(seq_f2b_pscore) <- names(seq_sd)
+
+
+my_list <- vector("list", 500000)
+for(i in 1:length(sequences)){
+  #print(i)
+  window <- c(-20,30)
+  z <- 1
+  x <- seq_f2b_pscore[[i]]
+  min_length <- 2*51 + 51 + 50
+  sd_cutoff <- -1
+  if(nrow(x) >= min_length){
+    my_sd <- which(x$deltaG < sd_cutoff)
+    my_sd <- my_sd[my_sd %in% (51+20):(nrow(x) - 51-30)]
+    for(n in my_sd){
+      my_x <- x[(n -20):(n+30),]
+      if(sum(my_x$deltaG[1:20] < sd_cutoff) < 2){
+        mean_occ <- mean(my_x$occ)
+        
+        if(mean_occ >= 3){
+          my_df_temp <- data_frame(deltaG = my_x$deltaG, pos = -20:30,
+                                   occ = my_x$occ / mean_occ,
+                                   occ2 = log2(occ + 1),
+                                   gene = paste(my_x$seqnames[1], my_x$start[21], sep = "_"))
+          my_list[[z]] <- my_df_temp
+          z <- z + 1
+        }
+      } 
+    }
+  }  
+}
+my_df <- do.call(rbind.data.frame, my_list)
+#print(paste("No of sites analysed: ", nrow(my_df) / 51))
+
+my_df2 <- my_df %>% group_by(pos) %>% summarise(sd_mean = mean(deltaG), sd_se = se(deltaG),
+                                      occ_mean = mean(occ), occ_se = se(occ),
+                                      occ2_mean = mean(occ2), occ2_se = se(occ2))
+
+p1 <- ggplot(my_df2, aes(pos, sd_mean)) + geom_line() + 
+  geom_ribbon(aes(ymin = sd_mean - sd_se, ymax = sd_mean + sd_se), alpha = .3) +
+  ylim(-4,3) + theme_classic() +
+  labs(x = "Position (bp)", y = "Average affinity for aSD (kcal/mol)") +
+  annotate("text", x = -12, y = 3, label = paste("n =", nrow(my_df) / 51), size = 3)
+
+p2 <- ggplot(my_df2, aes(pos, occ_mean)) + geom_line() + 
+  geom_ribbon(aes(ymin = occ_mean - occ_se, ymax = occ_mean + occ_se), alpha = .3) +
+  ylim(0.4, 1.9) + 
+  theme_classic() +
+  labs(x = "Position (bp)", y = "Average pause score (a.u.)")
+```
+
+```{r sd2p_score_calc_random, include = F, cache = T}
+
+my_list <- vector("list", 50000)
+for(i in 1:length(sequences)){
+  window <- c(-20,30) 
+  z <- 1
+  x <- seq_f2b_pscore[[i]]
+  min_length <- 2*51 + 51 + 50
+  sd_cutoff <- -1
+  if(nrow(x) >= min_length){
+    my_sd <- which(x$deltaG < sd_cutoff)
+    my_sd <- my_sd[my_sd %in% (51+20):(nrow(x) - 51-30)]
+    set.seed(123)
+    my_sd <- sample((51+20):(nrow(x) - 51-30), size = length(my_sd)*5, replace = T)
+    
+    
+    for(n in my_sd){
+      my_x <- x[(n -20):(n+30),]
+      #if(sum(my_x$deltaG[1:20] < sd_cutoff) < 5){
+        mean_occ <- mean(my_x$occ)
+        
+        if(mean_occ >= 3){
+          my_df_temp <- data_frame(deltaG = my_x$deltaG, pos = -20:30,
+                                   occ = my_x$occ / mean_occ,
+                                   occ2 = log2(occ + 1),
+                                   gene = paste(my_x$seqnames[1], my_x$start[21], sep = "_"))
+          my_list[[z]] <- my_df_temp
+          z <- z + 1
+        #}
+      } 
+    }
+  }  
+}
+my_df <- do.call(rbind.data.frame, my_list)
+#nrow(my_df) / 51
+
+my_df2 <- my_df %>% group_by(pos) %>% summarise(sd_mean = mean(deltaG), sd_se = se(deltaG),
+                                      occ_mean = mean(occ), occ_se = se(occ),
+                                      occ2_mean = mean(occ2), occ2_se = se(occ2))
+
+p3 <- ggplot(my_df2, aes(pos, sd_mean)) + geom_line() + 
+  geom_ribbon(aes(ymin = sd_mean - sd_se, ymax = sd_mean + sd_se), alpha = .3) +
+  ylim(-4,3) + theme_classic() +
+  labs(x = "Position (bp)", y = "Average affinity for aSD (kcal/mol)", title = "Random sequences") +
+  annotate("text", x = -12, y = 3, label = paste("n =", nrow(my_df) / 51), size = 3)
+
+p4 <- ggplot(my_df2, aes(pos, occ_mean)) + geom_line() + 
+  geom_ribbon(aes(ymin = occ_mean - occ_se, ymax = occ_mean + occ_se), alpha = .3) +
+  ylim(0.4, 1.9) + theme_classic() +
+  labs(x = "Position (bp)", y = "Average pause score (a.u.)")
+rm(mean_occ, min_length, my_list, my_sd, my_x, sd_cutoff, z, window)
+
+```
+
+```{r sd_plot3, fig.width=6, fig.height=6}
+multiplot(p1,p2,p3,p4, cols = 2) 
+```
+
+```{r cleaning_env}
+rm(all_p_scores, ccf_f2b, ccf_f2b_summ, i, mean_occ, min_length, my_df, my_df2, my_df_temp, my_list, my_sd, my_x, n, p1, p2, p3, p4,
+   sd_cutoff, seq_f2b_pscore, seq_f2b_pscore_df, seq_mfe, seq_mfe_pscore, seq_sd, window, z, x)
+```
+
+I will try to perform analysis similar to this:  
+
+
+```{r hexamer_sd, include=F, cache = T, eval = F}
+hex <- DNAStringSet(apply(expand.grid(DNA_BASES, DNA_BASES, DNA_BASES, DNA_BASES, DNA_BASES, DNA_BASES), 
+                          1, function(x) paste(x, collapse = "")))
+names(hex) <- paste("hex_", 1:length(hex), sep = "")
+
+hex_sd <- lapply(seq_along(hex), function(x) {
+  on.exit(print(x))
+  sd_res <- free2bind(hex[[x]], window = 6)
+  data.frame(hex = as.character(hex[[x]]), name = names(hex)[x], deltaG = sd_res$deltaG)
+}) 
+hex_sd <- bind_rows(hex_sd)
+```
+
+```{r, include = F, eval = F}
+
+# i = 6
+# j = which(hex_sd$hex == "TAAATA")
+
+all_data <- tibble()
+for(z in 4:8){
+  my_list <- vector("list", length = sum(width(transcripts)))
+  my_shift = z
+  l = 1
+  for(i in 1:length(transcripts)){
+  #for(i in 1:3){
+    print(i)
+    my_gene <- names(transcripts)[i]
+    if(p_scores[[my_gene]]$mean_reads[1] > 1){ # selecting genes with at least 3 reads per nuc
+      if(width(transcripts)[i] > 102){ # selecting genes with minimal required length
+        for(j in 1:nrow(hex_sd)){
+          my_match <- matchPattern(hex_sd$hex[j], transcripts[[i]])
+          my_df <- tbl_df(ranges(my_match))
+          my_df <- my_df %>% filter(start <= width(transcripts[i]) - my_shift) # filter sites that are only in a gene
+          my_df <- my_df %>% filter(start >= 41 & start <= width(transcripts[i]) - 61)
+          if(nrow(my_df) >= 1){ # test if there are any matches
+            res <- data.frame(gene = my_gene, 
+                              pos = my_df$start, 
+                              hex = hex_sd$hex[j], 
+                              p_score = p_scores[[my_gene]][my_df$start + my_shift,"p_score"], 
+                              delta_G = hex_sd$deltaG[j])
+            my_list[[l]] <- res
+            l <- l + 1
+          }else{}
+        }
+      } 
+    }
+  }
+  my_res <- bind_rows(my_list)
+  my_res$shift <- z
+  all_data <- bind_rows(all_data, my_res)
+}
+save(all_data, file = "li2012.rda")
+
+```
+
+```{r, eval = F}
+load("li2012.rda")
+
+my_res2 <- all_data %>% 
+  filter(delta_G <= 0) %>% 
+  group_by(hex, shift) %>% 
+  summarise(mean = mean(p_score), delta_G = mean(delta_G), n = n()) %>%
+  filter(n > 10)
+
+ggplot(my_res2, aes(-delta_G, mean)) + geom_point() + 
+  facet_wrap(facets = ~shift, nrow = 2, scales = "free_y") +
+  theme_classic() +
+  labs(x = "Affinity for aSD (-kcal mol-1)", y = "Ribosome occupancy")
+
+```
+
+
+
+
+## Rare codons
+
+Caution! Oryginal methodology was done using 5'assignment. However, this data show that 3' assigment is better. Thus we will use 3'assigment and 30bp shift (from 3' to 5') where on average should be 5'end of ribosome protected fragment.
+
+```{r codon_usage_average_01, include = F, cache=T}
+mean_reads <- 3
+
+# creating empty list() to store reads
+codon_list.names <- my_files$name
+codon_list <- vector("list", length(codon_list.names))
+names(codon_list) <- codon_list.names
+
+# reading results of mapping and calculating p_scores
+
+# oryginal methodology was done using 5'assignment. However, this data show that 3' assigment is better. 
+# thus we will use 3'assigment and 30bp shift where on average should be 5'end of ribosome
+
+
+for(i in my_files$name){
+  #print(paste("results/02_mapped_reads/", i, "_transcriptome_Aligned.out.bam", sep = ""))
+  reads <- readGAlignments(file = paste("raw_data/maize_mapped_reads/", i, "_transcriptome_Aligned.out.bam", sep = ""))
+  codon_list[[i]] <- codon.cov(transcripts, reads,ribo_shift = -30)
+}
+
+codon_list_mean <- vector("list", length = length(codon_list[[1]]))
+for(i in 1:length(codon_list_mean)){
+  data_per_gene <- lapply(codon_list, function(y) y[[i]])
+  data_mean <- data_per_gene[[1]] # tworze przejsciowa df
+  data_mean$occ <- apply(laply(data_per_gene, function(x) as.matrix(x[,3])), 2, mean) # licze srednia wartosc occ dla 3 powt
+  data_mean$p_score <- data_mean$occ / mean(data_mean$occ) # licze p_score
+  codon_list_mean[[i]] <- data_mean
+}
+
+names(codon_list_mean) <- names(codon_list[[1]])
+rm(i, data_per_gene, data_mean)
+
+
+
+
+
+
+```
+
+```{r codon_usage_average_02, include = F, cache=T}
+
+codon_list_mean_per_codon <- lapply(codon_list_mean, function(x){
+                    # transforming to codon-wise p_scores
+                    x$codon_no <- rep(1:(nrow(x)/3), each = 3)
+                    #x_mod <- x %>% group_by(codon_no, seqnames, codon) %>% summarise(occ_codon = sum(occ))
+                    x_mod <- x %>% group_by(codon_no, seqnames, codon) %>% summarise(occ_codon = occ[1])
+
+                    colnames(x_mod) <- c("pos", "seqnames", "codon", "occ")
+                    x_mod$mean_reads <- mean(x_mod$occ)
+                    x_mod$p_score <- x_mod$occ / x_mod$mean_reads
+                    x_mod
+                  })
+
+## calculating codon bias for averaged values
+codon_dist <- lapply(codon_list_mean_per_codon, function(x){
+                  #print(head(x))
+                  my_df <- data_frame()
+                  if(x$mean_reads[1] > 3){ # minimal coverage per codon
+                    for(i in 10:(nrow(x)-10)){
+                      temp_df <- x[(i-8):(i+8),]
+                      temp_df$pos <- -8:8
+                      p_score_pos0 <- temp_df$p_score[9]
+                      
+                      #removing codons with no reads
+                      if(p_score_pos0 > 0){
+                        my_df <- rbind(my_df, data_frame(pos = temp_df$pos, codon = temp_df$codon, p_score = p_score_pos0))
+                      }
+                    }
+                    rm(i, temp_df)
+                    my_df
+                  }else{
+                    my_df
+                  }
+                })
+  
+codon_dist <- do.call(rbind.data.frame, codon_dist)
+  
+codon_dist_summ <- codon_dist %>% 
+      group_by(pos, codon) %>% 
+      summarise(mean_pscore = mean(p_score), n = length(pos))
+  
+sapply(split(codon_dist_summ, codon_dist_summ$pos), nrow)
+codon_dist_summ2 <- lapply(split(codon_dist_summ, codon_dist_summ$pos), function(x){
+                            x$p_score_norm <- x$mean_pscore / mean(x$mean_pscore)
+                            x
+                          })
+codon_dist_summ2 <- do.call(rbind.data.frame, codon_dist_summ2)
+
+p1 <- ggplot(codon_dist_summ2, aes(pos, codon, fill = p_score_norm)) + geom_tile() + 
+  scale_fill_gradientn(colours = c("white", "grey30", "black"), limits=c(0, 4)) +
+  theme_classic(base_size = 7) + 
+  labs(x = "Distance to 5' end of read (codon)", title = "Real data")
+
+# random data
+codon_dist <- data_frame()
+for(j in 1:10){
+  codon_dist_0 <- lapply(codon_list_mean_per_codon, function(x){
+                    #print(head(x))
+                    my_df <- data_frame()
+                    set.seed(j)
+                    x$codon[2:(nrow(x)-1)] <- sample(x$codon[2:(nrow(x)-1)], replace = F)
+                    
+                    if(x$mean_reads[1] > 3){
+                      for(i in 10:(nrow(x)-10)){
+                        temp_df <- x[(i-8):(i+8),]
+                        temp_df$pos <- -8:8
+                        p_score_pos0 <- temp_df$p_score[9]
+                        
+                        #removing codons with no reads
+                        if(p_score_pos0 > 0){
+                          my_df <- rbind(my_df, data_frame(pos = temp_df$pos, codon = temp_df$codon, p_score = p_score_pos0))
+                        }
+                      }
+                      rm(i, temp_df)
+                      my_df
+                    }else{
+                      my_df
+                    }
+                  })
+    
+  codon_dist_0 <- do.call(rbind.data.frame, codon_dist_0)
+  codon_dist <- rbind(codon_dist, codon_dist_0)
+}
+
+
+#codon_dist <- do.call(rbind.data.frame, codon_dist)
+
+codon_dist_summ <- codon_dist %>% 
+      group_by(pos, codon) %>% 
+      summarise(mean_pscore = mean(p_score), n = length(pos))
+  
+sapply(split(codon_dist_summ, codon_dist_summ$pos), nrow)
+codon_dist_summ2 <- lapply(split(codon_dist_summ, codon_dist_summ$pos), function(x){
+                            x$p_score_norm <- x$mean_pscore / mean(x$mean_pscore)
+                            x
+                          })
+codon_dist_summ2 <- do.call(rbind.data.frame, codon_dist_summ2)
+
+p2 <- ggplot(codon_dist_summ2, aes(pos, codon, fill = p_score_norm)) + geom_tile() + 
+  scale_fill_gradientn(colours = c("white", "grey30", "black"), limits=c(0, 4)) +
+  theme_classic(base_size = 7) + 
+  labs(x = "Distance to 5' end of read (codon)", title = "Random data")
+
+```
+
+```{r codon_usage_plot, fig.width=7, fig.height=5.5}
+multiplot(p1,p2, cols = 2)
+```
+
+## Looking for the aa preferences
+I perform the same analysis with amino acids. 
+
+```{r codon_usage_aa_01, include = F, cache = T}
+aa_codon <- read.table("raw_data/codons", header = T)
+#z <- head(codon_list_mean_per_codon[[2]])
+#merge(z, aa_codon)
+
+codon_list_mean_per_aa <- lapply(codon_list_mean_per_codon, function(x){
+  x <- merge(x, aa_codon) %>% arrange(pos) %>% select(pos, seqnames, codon, occ, mean_reads, p_score,aa, positive)
+  x
+})
+
+
+
+
+## calculating codon bias for averaged values
+codon_dist <- lapply(codon_list_mean_per_aa, function(x){
+                  #print(head(x))
+                  my_df <- data_frame()
+                  if(x$mean_reads[1] > 3){ # minimal coverage per codon
+                    for(i in 10:(nrow(x)-10)){
+                      temp_df <- x[(i-8):(i+8),]
+                      temp_df$pos <- -8:8
+                      p_score_pos0 <- temp_df$p_score[9]
+                      
+                      #removing codons with no reads
+                      if(p_score_pos0 > 0){
+                        my_df <- rbind(my_df, data_frame(pos = temp_df$pos, aa = temp_df$aa, p_score = p_score_pos0))
+                      }
+                    }
+                    rm(i, temp_df)
+                    my_df
+                  }else{
+                    my_df
+                  }
+                })
+  
+codon_dist <- do.call(rbind.data.frame, codon_dist)
+  
+codon_dist_summ <- codon_dist %>% 
+      group_by(pos, aa) %>% 
+      summarise(mean_pscore = mean(p_score), n = length(pos))
+  
+sapply(split(codon_dist_summ, codon_dist_summ$pos), nrow)
+codon_dist_summ2 <- lapply(split(codon_dist_summ, codon_dist_summ$pos), function(x){
+                            x$p_score_norm <- x$mean_pscore / mean(x$mean_pscore)
+                            x
+                          })
+codon_dist_summ2 <- do.call(rbind.data.frame, codon_dist_summ2)
+
+p1 <- ggplot(codon_dist_summ2, aes(pos, aa, fill = p_score_norm)) + geom_tile() + 
+  scale_fill_gradientn(colours = c("white", "grey30", "black"), limits=c(0, 4)) +
+  theme_classic(base_size = 7) + 
+  labs(x = "Distance to 5' end of read (codon)", title = "Real data")
+
+
+
+# random data
+codon_dist <- data_frame()
+for(j in 1:10){
+  codon_dist_0 <- lapply(codon_list_mean_per_aa, function(x){
+                    #print(head(x))
+                    my_df <- data_frame()
+                    set.seed(j)
+                    x$aa[2:(nrow(x)-1)] <- sample(x$aa[2:(nrow(x)-1)], replace = F)
+                    
+                    if(x$mean_reads[1] > 3){
+                      for(i in 10:(nrow(x)-10)){
+                        temp_df <- x[(i-8):(i+8),]
+                        temp_df$pos <- -8:8
+                        p_score_pos0 <- temp_df$p_score[9]
+                        
+                        #removing codons with no reads
+                        if(p_score_pos0 > 0){
+                          my_df <- rbind(my_df, data_frame(pos = temp_df$pos, aa = temp_df$aa, p_score = p_score_pos0))
+                        }
+                      }
+                      rm(i, temp_df)
+                      my_df
+                    }else{
+                      my_df
+                    }
+                  })
+    
+  codon_dist_0 <- do.call(rbind.data.frame, codon_dist_0)
+  codon_dist <- rbind(codon_dist, codon_dist_0)
+}
+
+
+codon_dist_summ <- codon_dist %>% 
+      group_by(pos, aa) %>% 
+      summarise(mean_pscore = mean(p_score), n = length(pos))
+  
+sapply(split(codon_dist_summ, codon_dist_summ$pos), nrow)
+codon_dist_summ2 <- lapply(split(codon_dist_summ, codon_dist_summ$pos), function(x){
+                            x$p_score_norm <- x$mean_pscore / mean(x$mean_pscore)
+                            x
+                          })
+codon_dist_summ2 <- do.call(rbind.data.frame, codon_dist_summ2)
+
+p2 <- ggplot(codon_dist_summ2, aes(pos, aa, fill = p_score_norm)) + geom_tile() + 
+  scale_fill_gradientn(colours = c("white", "grey30", "black"), limits=c(0, 4)) +
+  theme_classic(base_size = 7) + 
+  labs(x = "Distance to 5' end of read (codon)", title = "Random data")
+
+```
+
+```{r codon_usage_plot2, fig.width=7, fig.height=2.5}
+multiplot(p1,p2, cols = 2)
+```
+
+# Protein features
+
+## amino acid charge
+
+Positively charged amino acid include Arg, Lys and depending on pH His. All of them were included in this analysis. 
+
+Arg: CGT, CGC, CGA, CGG, AGA, AGG  
+Lys: AAA, AAG  
+His: CAT, CAC  
+
+Impact of charged amino acids on ribosome velocity was analysed according to [@Charneski2013] with following modifications. Due to limited number of plastid genes that can by analysed +/- 13 aa window was used (giving 110 sites). Moreover, charged aa were allowed to be in each position between 0 and 5.
+
+```{r charged_aa_calc, include = F, cache = T}
+charged_aa <- c("CGT", "CGC", "CGA", "CGG", "AGA", "AGG", "AAA", "AAG", "CAT", "CAC")
+
+p_scores_charge <- lapply(p_scores, function(x){
+                        require(dplyr)
+                        x$codon_pos <- rep(1:(nrow(x)/3), each = 3)
+                        x$charged <- x$codon %in% charged_aa
+                        x <- x %>% group_by(codon_pos) %>%
+                          summarise(seqnames = unique(seqnames), 
+                                    occ = sum(occ) , 
+                                    codon = unique(codon),
+                                    charged = unique(charged))
+                        x
+                      })
+
+my_df <- data_frame()
+window <- 13
+min_protein_len <- 17*2 + window*2 + 1
+
+for(i in 1:length(p_scores_charge)){
+  print(i)
+  x <- p_scores_charge[[i]]
+  if(nrow(x) >= min_protein_len){
+    (my_charged_aa <- which(x$charged == T))
+    my_charged_aa <- my_charged_aa[my_charged_aa %in% (17+1+window):(nrow(x)-(17+window))]
+    #my_charged_aa <- sample(x = (17+1+window):(nrow(x)-(17+window)), length(my_charged_aa)*3, replace = T)
+    for(n in my_charged_aa){
+      x_subset <- x[c((n-window):(n+window)),]
+      if(sum(x_subset$charged[1:window]) == 0){
+        if(sum(x_subset$charged[(window+6):(2*window+1)]) == 0){
+          if(mean(x_subset$occ[1:window]) >= 3){ # the minimal coverage can be changed
+            mean30_occ <- mean(x_subset$occ[1:window])
+            my_df_temp <- data_frame(pos = -window:window,
+                                     occ = (x_subset$occ / mean30_occ),
+                                     occ_log2 = log2(occ + 1),
+                                     name = paste(unique(x_subset$seqnames), x_subset$codon_pos[window+1], sep = "_"),
+                                     charged_aa = as.numeric(x_subset$charged))
+            my_df <- rbind(my_df, my_df_temp)
+          }else{} # do nothing, too small coverage}
+        }else{}
+      }else{}# do nothing because of charged aa at first 30 (or window) aminoacids}
+    }
+  }else{} # nothing}
+}
+
+
+rm(i,x, window,mean30_occ,x_subset,n, my_charged_aa, min_protein_len,my_df_temp)
+
+my_df2 <- my_df %>% group_by(pos) %>% summarise(mean_occ = mean(occ), se_occ = se(occ),
+                                                mean_occ2 = mean(occ_log2), se_occ2 = se(occ_log2),
+                                                charge = mean(charged_aa))
+nrow(my_df)/27
+p1 <- ggplot(my_df2, aes(pos, mean_occ2)) + geom_line() + 
+  geom_ribbon(aes(ymin = mean_occ2 - se_occ2, ymax = mean_occ2 + se_occ2), alpha = 0.3) +
+  theme_classic(base_size = 7) +
+  labs(x = "Position [aa]", y = expression(paste("Average log2(", r[pos], "/", r[prec13]," +1)", sep = ""))) +
+  geom_hline(yintercept = 0.65, colour = "darkblue", alpha = .5) +
+  annotate("text", x = -10, y = 1.4, label = paste("n =", nrow(my_df)/27)) + ylim(0.6, 1.5)
+
+p2 <- ggplot(my_df2, aes(pos, mean_occ)) + geom_line() + 
+  geom_ribbon(aes(ymin = mean_occ - se_occ, ymax = mean_occ + se_occ), alpha = 0.3) +
+  theme_classic(base_size = 7) +
+  labs(x = "Position [aa]", y = expression(paste("Average ", r[pos], "/", r[prec13], sep = ""))) +
+  geom_hline(yintercept = 1, colour = "darkblue", alpha = .5) + ylim(c(0.5, 3.5))
+
+p3 <- ggplot(my_df2, aes(pos, charge)) + geom_line() + theme_classic(base_size = 7) +
+  labs(x = "Position [aa]", y = "Positively charged aa") + ylim(0,1)
+
+```
+
+```{r charged_aa_calc_random, include = F, cache = T}
+my_df <- data_frame()
+window <- 13
+min_protein_len <- 17*2 + window*2 + 1
+
+for(i in 1:86){
+  print(i)
+  x <- p_scores_charge[[i]]
+  if(nrow(x) >= min_protein_len){
+    (my_charged_aa <- which(x$charged == T))
+    my_charged_aa <- my_charged_aa[my_charged_aa %in% (17+1+window):(nrow(x)-(17+window))]
+    set.seed(1684)
+    my_charged_aa <- sample(x = (17+1+window):(nrow(x)-(17+window)), length(my_charged_aa)*3, replace = T)
+    for(n in my_charged_aa){
+      x_subset <- x[c((n-window):(n+window)),]
+      #if(sum(x_subset$charged[1:window]) == 0){
+        #if(sum(x_subset$charged[(window+6):(2*window+1)]) == 0){
+          if(mean(x_subset$occ[1:window]) >= 3){ # the minimal coverage can be changed
+            mean30_occ <- mean(x_subset$occ[1:window])
+            my_df_temp <- data_frame(pos = -window:window,
+                                     occ = (x_subset$occ / mean30_occ),
+                                     occ_log2 = log2(occ + 1),
+                                     name = paste(unique(x_subset$seqnames), x_subset$codon_pos[window+1], sep = "_"),
+                                     charged_aa = as.numeric(x_subset$charged))
+            my_df <- rbind(my_df, my_df_temp)
+          #}else{} # do nothing, too small coverage}
+        #}else{}
+      }else{}# do nothing because of charged aa at first 30 (or window) aminoacids}
+    }
+  }else{} # nothing}
+}
+
+rm(i,x, window,mean30_occ,x_subset,n, my_charged_aa, min_protein_len,my_df_temp)
+
+my_df2 <- my_df %>% group_by(pos) %>% summarise(mean_occ = mean(occ), se_occ = se(occ),
+                                                mean_occ2 = mean(occ_log2), se_occ2 = se(occ_log2),
+                                                charge = mean(charged_aa))
+#nrow(my_df)/27
+p4 <- ggplot(my_df2, aes(pos, mean_occ2)) + geom_line() + 
+  geom_ribbon(aes(ymin = mean_occ2 - se_occ2, ymax = mean_occ2 + se_occ2), alpha = 0.3) +
+  theme_classic(base_size = 7) +
+  labs(x = "Position [aa]", y = expression(paste("Average log2(", r[pos], "/", r[prec13]," +1)", sep = "")), title = "Random data") +
+  geom_hline(yintercept = 0.65, colour = "darkblue", alpha = .5) +
+  annotate("text", x = -9, y = 1.4, label = paste("n =", nrow(my_df)/27)) + ylim(0.6, 1.5)
+
+p5 <- ggplot(my_df2, aes(pos, mean_occ)) + geom_line() + 
+  geom_ribbon(aes(ymin = mean_occ - se_occ, ymax = mean_occ + se_occ), alpha = 0.3) +
+  theme_classic(base_size = 7) +
+  labs(x = "Position [aa]", y = expression(paste("Average ", r[pos], "/", r[prec13], sep = ""))) +
+  geom_hline(yintercept = 1, colour = "darkblue", alpha = .5) + ylim(c(0.5, 3.5))
+
+p6 <- ggplot(my_df2, aes(pos, charge)) + geom_line() + theme_classic(base_size = 7) +
+  labs(x = "Position [aa]", y = "Positively charged aa") + ylim(0,1)
+
+```
+
+```{r charged_aa_plot1, fig.width=5, fig.height=7, fig.cap="Pause sites arround charged amino acids."}
+multiplot(p1,p2,p3,p4,p5,p6, cols = 2) 
+```
+
+```{r cleaning_env4}
+rm(aa_codon, charged_aa, codon_dist, codon_dist_0, codon_dist_summ, codon_dist_summ2, codon_list, codon_list_mean, codon_list_mean_per_aa,
+   codon_list_mean_per_codon, codon_list.names, j, mean_reads, my_df, my_df2, p1,p2,p3,p4,p5,p6, p_scores, p_scores_charge, reads)
+```
+
+
+
+
+
+
+
+List of object in environment:
+
+```{r}
+# list of objects w/o functions
+print(ls()[!ls() %in% as.vector(lsf.str())])
+```

@@ -1,0 +1,262 @@
+---
+title: "Analysis of Chotewutmontri & Barkan data"
+author: "PG"
+date: "December 19, 2016"
+output: html_document
+---
+
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(fig.width=5, fig.height=4, fig.path='figs/',
+                      echo=FALSE, warning=FALSE, message=FALSE,
+                      dev = c("png"))
+
+source("../bin/functions24.R")
+
+# data manipulation
+library(plyr); library(dplyr)
+
+# bioinformatic packages
+library(Biostrings); library(GenomicAlignments)
+
+# graphics
+library(ggplot2); library(artyfarty); library(gridExtra); library(grid)
+```
+
+## General characterisation of reads mapped to the plastid transcriptome
+
+```{r read_length, cache = T, include = F}
+
+# I am reading names of the experiments from file
+my_files <- read.table("../raw_data/reads", header = T)
+
+# creating empty list() to store reads
+mylist.names <- my_files$name
+mylist <- vector("list", length(mylist.names))
+names(mylist) <- mylist.names
+
+# reading sequences (used for mapping of reads) and substracting transcript sequences
+sequences <- readDNAStringSet("../raw_data/pt_maize_transcripts_flanks50.fa")
+transcripts <- DNAStringSet(sequences, start = 51, end = width(sequences) - 50)
+ 
+# reading results of mapping and calculating p_scores
+for(i in my_files$name){
+  print(paste("../raw_data/maize_mapped_reads/", i, "_transcriptome_Aligned.out.bam", sep = ""))
+  reads <- readGAlignments(file = paste("../raw_data/maize_mapped_reads/", i, "_transcriptome_Aligned.out.bam", sep = ""))
+  mylist[[i]] <- reads %>% tbl_df()
+}
+rm(i, mylist.names, reads)
+
+names(mylist) <- paste(my_files$seqment, my_files$replicate, sep = "_")
+
+```
+
+Length of reads mapped to plastid genes (including ORFs) differ between replicates.
+
+```{r all_data, cache = T, fig.height=2.5}
+all_data <-  bind_rows(mylist)
+
+x <- all_data %>% filter(width >= 20 & width <= 50) %>% group_by(width) %>% summarise(n = n())
+ggplot(x, aes(width, n)) + geom_bar(stat = "identity") + 
+  labs(x = "Footprint length (bp)", y = "Counts", title = "All samples") +
+  theme_classic()
+rm(x, all_data)
+gc()
+```
+
+```{r rep23,  cache = T, cache.lazy = FALSE}
+mylist2 <- vector(mode = "list", length = length(mylist))
+for(i in 1:length(mylist)){
+  x <- mylist[[i]] %>% tbl_df()
+  x$sample <- names(mylist)[i]
+  mylist2[[i]] <- x
+}
+rm(mylist)
+gc()
+```
+
+```{r rep23_plot, fig.height=2.5, cache = T, cache.lazy = FALSE}
+all_data <-  bind_rows(mylist2)
+
+x <- all_data %>% filter(width >= 20 & width <= 50) %>% 
+  filter(sample %in% c("seg9_rep3",  "seg9_rep2",  "seg14_rep3", "seg14_rep2", "seg4_rep3",  "seg4_rep2",  "seg1_rep3",  "seg1_rep2")) %>%
+  group_by(width) %>% summarise(n = n())
+ggplot(x, aes(width, n)) + geom_bar(stat = "identity") + 
+  labs(x = "Footprint length (bp)", y = "Counts", title = "rep2 & rep3 samples") +
+  theme_classic()
+rm(x); gc()
+```
+
+```{r rep1_plot, fig.height=2.5, cache = T}
+x <- all_data %>% filter(width >= 20 & width <= 50) %>% 
+  filter(sample %in% c("seg9_rep1",  "seg14_rep1", "seg4_rep1",  "seg1_rep1")) %>%
+  group_by(width) %>% summarise(n = n())
+ggplot(x, aes(width, n)) + geom_bar(stat = "identity") + 
+  labs(x = "Footprint length (bp)", y = "Counts", title = "rep1 samples") +
+  theme_classic()
+```
+
+```{r cleaning_env_01}
+rm(i, mylist2, x); gc()
+```
+
+## Assignment to the START and STOP codons
+
+```{r assign_01, cache = T, cache.lazy=F}
+## START codon
+## 5'
+start_5 <- all_data %>% filter(strand == "+") %>% 
+  mutate(start = start - 51) %>% filter(start >= - 30 & start < 3) %>%
+  filter(width >= 20 & width <= 38) %>%
+  group_by(start, width) %>% summarise(occ = n())
+
+p1 <- ggplot(start_5, aes(x = start, y = width)) + geom_tile(aes(fill = occ), colour = "black") + 
+  scale_fill_gradient(low = "white", high = "blue", space = "Lab", na.value = "transparent", guide = "colourbar") +
+  theme_classic()
+
+start_3 <- all_data %>% filter(strand == "+") %>% 
+  mutate(end = end - 51) %>% filter(end >= 0 & end <= 12) %>%
+  filter(width >= 20 & width <= 38) %>%
+  group_by(end, width) %>% summarise(occ = n())
+
+p2 <- ggplot(start_3, aes(x = end, y = width)) + geom_tile(aes(fill = occ), colour = "black") + 
+  scale_fill_gradient(low = "white", high = "blue", space = "Lab", na.value = "transparent", guide = "colourbar") +
+  theme_classic()
+```
+
+Reads density around __start__ codon:
+
+```{r assign_01_plot, fig.width=9, fig.height=3}
+grid.arrange(p1,p2, ncol=2, widths = c(2, 1.15))
+gc()
+```
+
+```{r stop_codon_calc, cache = T, cache.lazy = FALSE}
+seqs_width <- tibble(seqname = names(sequences),  width = width(sequences))
+mylist_splited <- split(all_data, all_data$seqnames)
+
+mydata_end <- vector("list", length = length(mylist_splited))
+for(i in seq_along(mylist_splited)){
+  x <- mylist_splited[[i]]
+  x$start2 <- x$start - seqs_width$width[i] + 52
+  x$end2 <- x$end - seqs_width$width[i] + 52
+  mydata_end[[i]] <- x
+}
+mydata_end <- bind_rows(mydata_end)
+
+```
+
+```{r assign_02_calc, cache = T}
+stop_5 <- mydata_end %>% filter(start2 >= - 33 & start2 <= -1) %>%
+  filter(width >= 20 & width <= 38) %>%
+  group_by(start2, width) %>% summarise(occ = n())
+p1 <- ggplot(stop_5, aes(x = start2, y = width)) + geom_tile(aes(fill = occ), colour = "black") + 
+  scale_fill_gradient(low = "white", high = "blue", space = "Lab", na.value = "transparent", guide = "colourbar") +
+  theme_classic()
+stop_3 <- mydata_end %>% filter(end2 >= 0 & end2 <= 12) %>%
+  filter(width >= 20 & width <= 38) %>%
+  group_by(end2, width) %>% summarise(occ = n())
+p2 <- ggplot(stop_3, aes(x = end2, y = width)) + geom_tile(aes(fill = occ), colour = "black") + 
+  scale_fill_gradient(low = "white", high = "blue", space = "Lab", na.value = "transparent", guide = "colourbar") +
+  theme_classic()
+```
+
+Reads density around __stop__ codon:
+```{r assign_02_plot, fig.width=9, fig.height=3}
+grid.arrange(p1,p2, ncol=2, widths = c(2, 1.15))
+rm(all_data, mylist); gc()
+```
+
+## Ribosome pause sites correlation between replicates
+
+```{r read_data, cache = T, include = F}
+# creating empty list() to store reads
+mylist.names <- my_files$name
+mylist <- vector("list", length(mylist.names))
+names(mylist) <- mylist.names
+
+# reading results of mapping and calculating p_scores
+for(i in seq_along(my_files$name)){
+  print(paste("../raw_data/maize_mapped_reads/", my_files$name[i], 
+              "_transcriptome_Aligned.out.bam", sep = ""))
+  reads <- readGAlignments(file = paste("../raw_data/maize_mapped_reads/", 
+                                        my_files$name[i], "_transcriptome_Aligned.out.bam", sep = ""))
+  mylist[[i]] <- codon.cov(transcripts, reads, ribo_shift = - 7)
+}
+rm(i, mylist.names, reads)
+
+```
+
+```{r p_score_cor_calc, cache = T, dependson="read_data", fig.width=9, fig.height=9}
+library(PerformanceAnalytics)
+my_df_cor <- data.frame(seg9_3 = character(), seg9_1 = character(), seg9_2 = character())
+for(i in 1:length(sequences)){
+  # only genes with an average 1 or more reads per nucleotyde are included
+  if(mylist[[1]][[i]][1,5] >= 1){
+      my_matrix <- matrix(nrow = nrow(mylist[[1]][[i]]), ncol = length(mylist))
+      for(x in 1:length(mylist)){
+        temp <- as.data.frame(mylist[[x]][[i]])
+        my_matrix[,x] <- temp[,4]
+      }
+      my_matrix <- log10(my_matrix + 1)
+      my_df_cor <- rbind(my_df_cor, as.data.frame(my_matrix))
+  }else{
+  }
+} 
+rm(my_matrix, i, x, temp)
+colnames(my_df_cor) <- paste(my_files$seqment, my_files$replicate, sep = "_")
+
+chart.Correlation(my_df_cor, histogram=F, pch=19)
+```
+
+## Periodicity of ribosome protected fragments
+
+```{r period_01, cache = T, echo=F, message=F, warning=F, include = F}
+length_tested <- 28:36
+period_list <- vector("list", length = length(length_tested))
+
+for(j in seq_along(length_tested)){
+  # creating empty list() to store reads
+  mylist.names <- my_files$name
+  mylist <- vector("list", length(mylist.names))
+  names(mylist) <- mylist.names
+  
+  i <- my_files$name[1]
+  #print(paste("results/02_mapped_reads/", i, "_transcriptome_Aligned.out.bam", sep = ""))
+  reads <- readGAlignments(file = paste("../raw_data/maize_mapped_reads/", i, "_transcriptome_Aligned.out.bam", sep = ""))
+  mylist[[1]] <- codon.cov(transcripts, reads, ribo_shift = - 6, length = length_tested[j])
+  rm(i, reads)
+  
+  codons_period <- vector("list", length(mylist[[1]]))
+  for(i in 1:length(codons_period)){
+    x <- mylist[[1]][[i]]
+    x$codon_n <- rep(1:(nrow(x)/3), each = 3)
+    y <- x %>% group_by(codon_n) %>% summarise(sum = sum(occ))
+    x$sum <- rep(y$sum, each = 3)
+    x$pos <- rep(1:3, nrow(x)/3)
+    x <- x %>% filter(sum != 0 & mean_reads >= 3) %>% mutate(rel_occ = occ/sum)
+    codons_period[[i]] <- x
+  }
+  codons_all <- bind_rows(codons_period)
+  my_period <- codons_all %>% group_by(pos) %>% summarise(mean = mean(rel_occ), sd = se(rel_occ))
+  my_period$length <- length_tested[j]
+  period_list[[j]] <- my_period
+}
+
+my_df <- do.call(rbind.data.frame, period_list)
+```
+
+```{r period_plot_01, fig.height=5, fig.width=3}
+ggplot(my_df, aes(pos, mean)) + geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd), width = 0.5)  + 
+  geom_bar(stat = "identity", width = 0.8) + facet_wrap(facets = ~length, ncol = 3) +
+  theme_classic() + labs(x = "Frame", y = "Relative abundance")
+```
+
+
+
+### List of object in env
+
+```{r}
+# list of objects w/o functions
+print(ls()[!ls() %in% as.vector(lsf.str())])
+```
